@@ -47,6 +47,7 @@ def main():
     # Open gripper after this step^
     # Move away from turntable 1: [0.01, 0.7922, -0.2304, -2.0334, -0.9806, 1.5827, 0.4381]
     # Grab Cup 2: [0.7782, 1.2754, -0.9127, -2.2612, 0.3216, 1.5339, -0.0672]
+    # Grab Cup 3: [1.5221, 1.4311, -1.0157, -2.1599, 0.862, 0.8393, 0.0766]
 
     # IV. Visualize the trajectory in simulation
     cartesian_traj, dt = motion_generator.calculate_cartesian_pose_trajectory(se3_start, se3_target,
