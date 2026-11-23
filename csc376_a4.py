@@ -7,6 +7,136 @@ from spatialmath import SE3
 
 from csc376_franky import FrankaJointTrajectoryController
 
+
+def rotate_shelf(
+    motion_generator,
+    robot,
+    panda,
+    angle_deg=90,
+    radius=0.11,
+    center=(0.2586, -0.5892),
+    execute=False
+):
+    """
+    Plan one counterclockwise shelf rotation.
+
+    Robot must already be holding the shelf leg.
+    Does not execute unless execute=True.
+    """
+
+    q_start = np.asarray(
+        robot.get_current_joint_positions(),
+        dtype=float
+    )
+
+    T_start = panda.fkine(q_start)
+    p = T_start.t
+
+    center = np.asarray(center)
+
+    # Starting angle around shelf centre
+    theta_start = np.arctan2(
+        p[1] - center[1],
+        p[0] - center[0]
+    )
+
+    # Check radius against measured geometry
+    measured_radius = np.linalg.norm(
+        p[:2] - center
+    )
+
+    if abs(measured_radius - radius) > 0.01:
+        raise RuntimeError(
+            "Gripper is not at the expected shelf radius."
+        )
+
+    # Divide the rotation into 12 short segments
+    segments = 12
+    total_angle = np.deg2rad(angle_deg)
+
+    planned = []
+    q_current = q_start.copy()
+    T_current = T_start
+
+    for i in range(1, segments + 1):
+
+        angle = total_angle * i / segments
+        theta = theta_start + angle
+
+        # Calculate next point on the circle
+        x = center[0] + radius * np.cos(theta)
+        y = center[1] + radius * np.sin(theta)
+        z = p[2]
+
+        # Rotate gripper orientation with shelf
+        R = (SE3.Rz(angle) * T_start).R
+        T_next = SE3.Rt(R, [x, y, z])
+
+        # Course Ruckig planner
+        cartesian_traj, dt = (
+            motion_generator.calculate_cartesian_pose_trajectory(
+                T_current,
+                T_next,
+                0.02,
+                0.01,
+                0.05
+            )
+        )
+
+        q_traj = np.asarray(
+            motion_generator.cartesian_pose_to_joint_trajectory(
+                panda,
+                q_current,
+                cartesian_traj
+            )
+        )
+
+        if not np.all(np.isfinite(q_traj)):
+            raise RuntimeError("Invalid joint trajectory")
+
+        if np.max(np.abs(np.diff(q_traj, axis=0))) > 0.10:
+            raise RuntimeError("Large joint step detected")
+
+        if np.any(q_traj < panda.qlim[0]) or \
+           np.any(q_traj > panda.qlim[1]):
+            raise RuntimeError("Joint limit exceeded")
+
+        planned.append((q_traj, dt))
+        q_current = q_traj[-1].copy()
+        T_current = panda.fkine(q_current)
+
+    print("Planned", segments, "arc segments.")
+
+    if not execute:
+        print("Planning only: no robot movement.")
+        return planned
+
+    # Execute only after an explicit confirmation.
+    confirmation = input(
+        "Execute shelf rotation on connected robot? "
+        "Type YES: "
+    )
+
+    if confirmation != "YES":
+        print("Rotation cancelled.")
+        return planned
+
+    for i, (q_traj, dt) in enumerate(planned):
+        actual_q = np.asarray(
+            robot.get_current_joint_positions()
+        )
+
+        if not np.allclose(actual_q, q_traj[0], atol=0.01):
+            raise RuntimeError(
+                f"Robot position mismatch at segment {i+1}"
+            )
+
+        robot.run_joint_trajectory(q_traj, dt)
+
+    print("Shelf rotation complete.")
+    return planned
+
+
 def move_arm(motion_generator, csc376_franky_robot, se3_start, se3_target, relative_vel_factor, relative_acc_factor, relative_jerk_factor):
     panda_rtb_model = rtb.models.Panda()
     q_start = csc376_franky_robot.get_current_joint_positions()
@@ -79,6 +209,15 @@ def main():
     se3_target = panda_rtb_model.fkine([0.233, 1.0381, -0.9726, -2.1166, -1.5948, 2.2983, 0.5578])
     move_arm(motion_generator, csc376_franky_robot, se3_start, se3_target, 0.06, 0.01, 0.05)
     csc376_gripper.grasp(0.079, 0.07995638996362686, 0.5)
+
+    # Plan one 90-degree counterclockwise rotation
+    rotate_shelf(
+        motion_generator,
+        csc376_franky_robot,
+        panda_rtb_model,
+        angle_deg=90,
+        execute=False
+    )
 
     csc376_gripper.open(0.05)
     return visualizer
