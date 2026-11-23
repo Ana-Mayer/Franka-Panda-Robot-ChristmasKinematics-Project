@@ -1,6 +1,9 @@
 # NOTE: This is swift only and unstable (haven't added collision detection)
 # !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 import math
+import argparse
+from scipy.interpolate import PchipInterpolator
+from csc376_franky import FrankaJointTrajectoryController
 import numpy as np
 import roboticstoolbox as rtb
 import spatialgeometry as sg
@@ -11,11 +14,13 @@ from csc376_franky.visualizer import RtbVisualizer
 SHELF_RADIUS = 0.11
 SHELF_HEIGHT = 0.20
 SHELF_CLEARANCE = 0.015   # inflated cylinder radius; approximate
-SHELF_ROTATION_DEG = 90.0  # 90-degree diagnostic; actual target ~120 degrees
+SHELF_ROTATION_DEG = 90.0  # Preview only; real indexing requires calibrated 120 deg
 SHELF_ARC_STEPS = 100
 TABLE_LENGTH, TABLE_WIDTH, TABLE_THICKNESS = 1.79, 0.90, 0.04
 TABLE_X, TABLE_Y = 0.20, 0.0
-DT = 0.035               # PREVIEW ONLY; NOT safe robot timing
+PREVIEW_DT = 0.035       # Swift preview only
+ROBOT_DT = 0.01          # Robot controller sample interval
+MAX_JOINT_STEP = 0.020  # Course miniPC accepts at most 0.025 rad
 TRANSFER_STEPS = 70
 LIFT_HEIGHT = 0.07
 OPEN_WIDTH, CLOSED_WIDTH = 0.07, 0.025
@@ -142,27 +147,36 @@ class CollisionEnvironment:
                 "Robot model lacks enough moving-link collision geometry. "
                 "Cannot claim collision-aware planning; check model and Coal installation."
             )
-        # Force immediate backend validation. Do not swallow missing-Coal errors.
+        # Validate installed collision backend and model geometry. The base can
+        # legitimately touch the tabletop, so check moving links individually.
         try:
             panda.iscollided(Q["exit"], self.shelf)
-            self.collisions(Q["exit"], check_shelf=False)
         except Exception as exc:
             raise RuntimeError(
-                "Collision engine unavailable or incompatible. Install Coal in the "
-                "Dev Container (pip install 'roboticstoolbox-python[collision]')."
+                f"External collision API/model failed: {type(exc).__name__}: {exc}"
             ) from exc
+        # In the installed CSC376 RTB 1.4.2 build, `isselfcollided` may
+        # not exist. Never represent its absence as passing a safety test.
+        self.self_collision_available = False
+        try:
+            panda.iscollided(Q["exit"], panda)
+            self.self_collision_available = True
+        except (AttributeError, TypeError, ValueError, NotImplementedError) as exc:
+            print("WARNING: self-collision check unavailable:", exc)
+        print("Self-collision checking available:", self.self_collision_available)
 
     def collisions(self, q, check_shelf=True):
         q = np.asarray(q, dtype=float)
         reasons = []
         if np.any(q < self.lower) or np.any(q > self.upper):
-            reasons.append("joint limit / 2-degree margin")
-            return reasons
-        # Updates world transforms used by each link collision object.
-        if self.robot.isselfcollided(q):
-            reasons.append("self collision")
-        # Refresh world transforms for per-link external collision queries.
-        # (isselfcollided(q) has updated robot link positions.)
+            return ["joint limit / 2-degree margin"]
+        # An external collision query updates link collision transforms.
+        self.robot.iscollided(q, self.table)
+        if self.self_collision_available:
+            if self.robot.iscollided(q, self.robot):
+                reasons.append("self collision")
+        # The fixed mounting base may intentionally contact the table.
+        # Check the modeled moving links against the table only.
         for link in self.moving_links:
             if link.iscollided(self.table):
                 reasons.append("table (moving link)")
@@ -311,75 +325,211 @@ def densify_path(path, env):
     return np.asarray(out)
 
 
+# ============================================================================
+# COURSE CONTROLLER ADAPTER
+# ============================================================================
+# This code does NOT use the fixed preview dt for physical execution.
+# PCHIP preserves joint waypoints, and time scaling enforces conservative
+# estimates of the course server's joint velocity / acceleration / step tests.
+# It is NOT a substitute for verified geometry, continuous collision checking,
+# FCI monitoring, and supervision by the lab staff.
+
+JOINT_V_MAX = 0.20 * np.array([2.175]*4 + [2.61]*3)
+JOINT_A_MAX = 0.50 * np.array([15.0, 7.5, 10.0, 12.5, 15.0, 20.0, 20.0])
+
+
+def time_parameterize(path, dt=ROBOT_DT):
+    path = np.asarray(path, dtype=float)
+    if path.ndim != 2 or path.shape[1] != 7 or len(path) < 2:
+        raise ValueError("Expected at least two 7-joint waypoints")
+    # Remove consecutive duplicate points; PCHIP requires strictly increasing s.
+    keep = [0]
+    for i in range(1, len(path)):
+        if np.linalg.norm(path[i]-path[keep[-1]]) > 1e-9:
+            keep.append(i)
+    path = path[keep]
+    if len(path) < 2:
+        return np.vstack([path[0], path[0]]), dt
+    intervals = np.linalg.norm(np.diff(path, axis=0), axis=1)
+    s = np.r_[0., np.cumsum(intervals)]
+    spline = PchipInterpolator(s/s[-1], path, axis=0)
+    # Start/stop at rest using quintic time law. Adapt duration to satisfy
+    # finite-difference limits of the COURSE server, not just Cartesian speed.
+    duration = max(4.0, s[-1]/0.10)
+    for _ in range(12):
+        count = int(math.ceil(duration/dt)) + 1
+        if count > 120000 or count * dt > 600:
+            raise RuntimeError("Trajectory exceeds controller point/duration limits")
+        u = np.linspace(0., 1., count)
+        smooth = 10*u**3 - 15*u**4 + 6*u**5
+        result = np.asarray(spline(smooth), dtype=float)
+        # Match endpoints exactly.
+        result[0], result[-1] = path[0], path[-1]
+        step = np.max(np.abs(np.diff(result,axis=0)), axis=0)
+        vel = np.max(np.abs(np.diff(result,axis=0)/dt), axis=0)
+        acc = np.max(np.abs(np.diff(result,n=2,axis=0)/(dt*dt)),axis=0)
+        if (np.all(step < MAX_JOINT_STEP) and
+            np.all(vel < JOINT_V_MAX) and
+            np.all(acc < JOINT_A_MAX)):
+            return result, dt
+        duration *= 1.45
+    raise RuntimeError("Failed to time-parameterize path conservatively")
+
+
+def preflight(panda, path, env, check_shelf=True, allow_contact=False):
+    # Every link collision and joint-limit check is discrete, not continuous.
+    if allow_contact and check_shelf:
+        raise ValueError("Contradictory shelf-contact settings")
+    for i, q in enumerate(path):
+        hits = env.collisions(q, check_shelf=check_shelf)
+        if hits:
+            raise RuntimeError(f"Rejected waypoint {i}/{len(path)}: {hits}")
+    for a, b in zip(path[:-1],path[1:]):
+        if not env.edge_clear(a,b,check_shelf=check_shelf):
+            raise RuntimeError("Rejected edge between two sampled waypoints")
+
+
+def require_exact_start(controller, expected):
+    observed = np.asarray(controller.get_current_joint_positions(), dtype=float)
+    err = np.max(np.abs(observed-expected))
+    if err > 0.01:
+        raise RuntimeError(f"Robot moved since planning (max error {err:.4f} rad). "
+                           "Replan from current state; do not force a connection.")
+
+
 def main():
+    parser = argparse.ArgumentParser(description="CSC376 Panda three-cup experiment")
+    parser.add_argument("--mode", choices=["preview", "sim", "real"], default="preview")
+    parser.add_argument("--cycles", type=int, choices=[1,2,3], default=1)
+    parser.add_argument("--allow-unverified-real", action="store_true",
+                        help="Lab-supervised only. Acknowledges missing calibration/geometry validation.")
+    args = parser.parse_args()
     np.set_printoptions(precision=4, suppress=True)
     panda = rtb.models.Panda()
     first = panda.fkine(Q["leg"]).t
     last = panda.fkine(Q["rotated_measured"]).t
-    candidate_a, candidate_b = candidate_centers(first, last, SHELF_RADIUS)
-    # Always choose the green CCW candidate, regardless of array naming.
-    center = min([candidate_a, candidate_b], key=lambda c: ccw_angle(first, last, c))
-    print("Estimated shelf centre XY:", center)
-    print(f"CCW rotation: {SHELF_ROTATION_DEG:g} degrees, r={SHELF_RADIUS}m")
-    print("SWIFT-ONLY. NO ROBOT SERVER / PHYSICAL ROBOT CONNECTION.")
-    print("WARNING: approximate geometry, and motion is NOT time-parameterized for hardware.")
-    arc = build_shelf_arc(panda, center)
-    print("Arc IK:", len(arc), "waypoints")
+    candidates = candidate_centers(first,last,SHELF_RADIUS)
+    center = min(candidates, key=lambda c: ccw_angle(first,last,c))
+    print("Shelf pivot ESTIMATE:", center)
+    print(f"Shelf rotation: {SHELF_ROTATION_DEG:g} deg; actual indexing requires ~120 deg")
 
-    env_collision = CollisionEnvironment(panda, center)
-    print("Moving links with collision shapes:", len(env_collision.moving_links))
-    print("Planning radial release and collision-aware exit...")
-    release = release_from_shelf(panda, env_collision, arc[-1], center)
-    rng = np.random.default_rng(RRT_SEED)
-    exit_waypoints = rrt_connect(release[-1], Q["exit"], env_collision, rng)
-    exit_waypoints = shortcut_path(exit_waypoints, env_collision, rng)
-    exit_trajectory = densify_path(exit_waypoints, env_collision)
-    print("Checked exit trajectory:", len(exit_trajectory), "samples")
-    print("NOTE: discrete geometry checking, not continuous collision certification.")
+    # Real hardware constraints: the shelf and TCP are not calibrated, the
+    # cup transfer paths have not been checked fully and shelf rotation 90 != 120.
+    # Never run a repeated uncalibrated shelf grasp on hardware.
+    if args.mode == "real":
+        if args.cycles != 1:
+            raise RuntimeError("Real mode is restricted to ONE cycle until shelf index geometry is measured")
+        if not args.allow_unverified_real:
+            raise RuntimeError(
+                "Physical robot execution is BLOCKED by default. Current shelf/TCP/"
+                "cup geometry is approximate. Review all paths with lab staff; "
+                "then use --allow-unverified-real only under direct supervision.")
+        print("WARNING: USER-ACKNOWLEDGED EXPERIMENTAL REAL ROBOT MODE")
 
-    current = Q["cup1"].copy()
-    viewer = None
+    arc = build_shelf_arc(panda,center)
+    print("Shelf arc IK solved:",len(arc))
+    env=CollisionEnvironment(panda,center)
+    print("Moving links with collision geometry:",len(env.moving_links))
+    if args.mode == "real" and not env.self_collision_available:
+        raise RuntimeError("Physical execution blocked: the installed Panda model "
+                           "cannot perform a self-collision check. Use --mode sim "
+                           "and update the collision model before real execution.")
+    print("Planning release + RRT exit...")
+    release=release_from_shelf(panda,env,arc[-1],center)
+    rng=np.random.default_rng(RRT_SEED)
+    raw_exit=rrt_connect(release[-1],Q["exit"],env,rng)
+    exit_path=densify_path(shortcut_path(raw_exit,env,rng),env)
+    print("Exit path planned:",len(exit_path),"samples")
+
+    controller=None
+    viewer=None
     try:
-        viewer = RtbVisualizer(panda, current)
+        if args.mode != "preview":
+            if args.mode == "sim":
+                controller=FrankaJointTrajectoryController(host="127.0.0.1")
+            else:
+                # Default host is the station's miniPC, per course API.
+                controller=FrankaJointTrajectoryController()
+            print("Connected controller current q:",controller.get_current_joint_positions())
 
-        def play(path, message):
+        # Start Swift at current physical/simulated pose where applicable.
+        q_initial=(np.asarray(controller.get_current_joint_positions(),dtype=float)
+                   if controller is not None else Q["cup1"].copy())
+        viewer=RtbVisualizer(panda,q_initial,real_robot=controller)
+        current=q_initial.copy()
+
+        def run(path,label,check_shelf=True,contact=False):
             nonlocal current
-            path = np.asarray(path, dtype=float)
-            if not np.allclose(path[0], current, atol=1e-4):
-                raise ValueError(f"Discontinuous preview at {message}")
-            print(message)
-            viewer.run_joint_trajectory(path, DT)
-            current = path[-1].copy()
+            path=np.asarray(path,dtype=float)
+            if not np.allclose(path[0],current,atol=1e-6):
+                raise RuntimeError(f"Path discontinuity in {label}")
+            # Keep drawing possible but reject unsafe physical moves.
+            print("\nMOVE:",label)
+            if args.mode == "preview":
+                viewer.run_joint_trajectory(path,PREVIEW_DT)
+            else:
+                # For the shelf leg, the coarse cylinder overlaps the gripper.
+                # Do not interpret the contact exception as collision approval.
+                preflight(panda,path,env,check_shelf=check_shelf,allow_contact=contact)
+                timed,dt=time_parameterize(path)
+                # Smoothing can change the path: CHECK AGAIN after timing.
+                resampled_for_check = np.vstack([timed[::4], timed[-1]])
+                preflight(panda,resampled_for_check,env,
+                          check_shelf=check_shelf,allow_contact=contact)
+                viewer.run_joint_trajectory(timed,dt)
+                answer=input(f"Execute '{label}' on {args.mode.upper()} robot? "
+                             "Type EXACTLY EXECUTE: ")
+                if answer != "EXECUTE":
+                    raise RuntimeError("User cancelled. No command sent for this segment")
+                require_exact_start(controller,timed[0])
+                controller.run_joint_trajectory(timed,dt)
+                require_exact_start(controller,timed[-1])
+            current=path[-1].copy()
 
-        def move(target, message):
-            play(joint_interpolation(current, target), message)
+        def joint_move(target,label,check_shelf=True):
+            run(joint_interpolation(current,np.asarray(target,dtype=float)),
+                label,check_shelf=check_shelf)
 
-        viewer.move_gripper(OPEN_WIDTH, 0.1)
-        input("Press Enter to preview all 3 cup cycles in Swift...")
-        for cup in range(1, 4):
-            print(f"\n===== CUP {cup} =====")
-            move(Q[f"cup{cup}"], f"Cup {cup}: approach recorded pickup [UNVALIDATED]")
-            viewer.move_gripper(CLOSED_WIDTH, 0.1)
-            print("Close gripper (visual only)")
-            lift = lift_path(panda, current)
-            if lift is not None:
-                play(lift, "Lift cup 7cm [UNVALIDATED]")
-            move(Q["approach"], "Transfer toward shelf [UNVALIDATED]")
-            move(Q["place"], "Place cup [UNVALIDATED]")
-            viewer.move_gripper(OPEN_WIDTH, 0.1)
-            move(Q["retreat"], "Retreat after placement [UNVALIDATED]")
-            move(Q["leg"], "Approach shelf leg [UNVALIDATED]")
-            viewer.move_gripper(CLOSED_WIDTH, 0.1)
-            play(arc, f"Rotate shelf {SHELF_ROTATION_DEG:g} degrees CCW [contact preview]")
-            viewer.move_gripper(OPEN_WIDTH, 0.1)
-            play(release, "Release leg and retract radially [shelf contact exception]")
-            play(exit_trajectory, "Collision-checked joint-space exit [preview only]")
+        def gripper(width,label):
+            print("GRIPPER:",label)
+            viewer.move_gripper(width,0.1)
+            if controller is not None:
+                response=input(f"Command gripper width {width:.3f}m "
+                               f"on {args.mode.upper()}? Type GRIPPER: ")
+                if response != "GRIPPER":
+                    raise RuntimeError("Gripper command cancelled")
+                # Course API supports robot.move_gripper(width).
+                # Width is not automatically a secure grasp of the real object.
+                controller.move_gripper(width)
 
-        print("\nDone. No hardware commands were sent.")
+        gripper(OPEN_WIDTH,"open")
+        input("Press Enter to start preview / individually confirmed movements...")
+        for cup in range(1,args.cycles+1):
+            print(f"\n========== CUP {cup} ==========")
+            joint_move(Q[f"cup{cup}"],f"Cup {cup} pickup pose [NOT CALIBRATED]")
+            gripper(CLOSED_WIDTH,"grasp cup (width is an estimate)")
+            lift=lift_path(panda,current)
+            if lift is None:
+                raise RuntimeError("Cup lift IK failed; stopping (no skip on controller)")
+            run(lift,"Lift cup 7cm")
+            joint_move(Q["approach"],"Move toward shelf")
+            joint_move(Q["place"],"Place cup")
+            gripper(OPEN_WIDTH,"release cup")
+            joint_move(Q["retreat"],"Retreat from cup placement",check_shelf=False)
+            joint_move(Q["leg"],"Approach shelf leg",check_shelf=False)
+            gripper(CLOSED_WIDTH,"grasp shelf leg (not calibrated)")
+            run(arc,"Rotate shelf along CCW arc",check_shelf=False,contact=True)
+            gripper(OPEN_WIDTH,"release shelf leg")
+            run(release,"Retract shelf leg radially",check_shelf=False,contact=True)
+            run(exit_path,"RRT collision-checked exit")
+        print("All requested cycles completed.")
         input("Press Enter to close Swift...")
     finally:
         if viewer is not None:
             viewer.stop()
+        if controller is not None:
+            # close() disconnects; DO NOT call stop() unless actively stopping a trajectory.
+            controller.close()
 
 
 if __name__ == "__main__":
