@@ -49,7 +49,7 @@ if visualizer is not None:
 robot.run_joint_trajectory(q_traj, dt)
 print("at grasp:", np.round(robot.get_current_joint_positions(), 4))
 
-plans = st.run_shelf_turn(robot, panda, visualizer=visualizer, ask=False)
+plans = st.run_shelf_turn(robot, panda, visualizer=visualizer)
 
 # Where did the gripper end up, compared with the taught end position?
 q_end = np.asarray(robot.get_current_joint_positions())

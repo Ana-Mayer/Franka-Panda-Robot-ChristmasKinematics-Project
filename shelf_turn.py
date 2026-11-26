@@ -43,7 +43,7 @@ Q_LEG_END = [-0.0246, 1.6600, -1.0082, -2.4151, -2.8761, 1.2171, 1.9770]
 # PUSH goes this many degrees past the taught end position to make up for that.
 EXTRA_PUSH_DEG = 10.0
 
-GRIPPER_SPEED = 0.02     # top speed of the gripper along the curve [m/s]
+GRIPPER_SPEED = 0.03     # top speed of the gripper along the curve [m/s] (0.02 before speeding up)
 DT = 0.05                # time between trajectory points [s]; the robot fills in 1 kHz between them
 
 # The robot server's checks (see robot-interface/README.md, "What the miniPC checks")
@@ -222,11 +222,11 @@ def plan_shelf_turn(panda, q_now, turn_points=TAUGHT_TURN_POINTS, q_end=Q_LEG_EN
     return plans
 
 
-def run_shelf_turn(robot, panda, visualizer=None, ask=True):
+def run_shelf_turn(robot, panda, visualizer=None):
     """
     Plan from where the robot is now (it must already hold the leg), then run the plan.
-    With a visualizer, each move is shown first. With ask=True, nothing moves until
-    you type YES.
+    With a visualizer, each move is shown there first. A plan that fails the safety
+    checks raises an error before the robot moves.
     """
     q_now = np.asarray(robot.get_current_joint_positions(), dtype=float)
     plans = plan_shelf_turn(panda, q_now)
@@ -235,10 +235,6 @@ def run_shelf_turn(robot, panda, visualizer=None, ask=True):
         for name, q_traj, dt in plans:
             print(f"Showing {name} in the visualizer")
             visualizer.run_joint_trajectory(q_traj, dt)
-
-    if ask and input("Run the shelf turn on the robot? Type YES: ") != "YES":
-        print("Cancelled; the robot did not move.")
-        return plans
 
     for name, q_traj, dt in plans:
         print(f"Running {name}")
