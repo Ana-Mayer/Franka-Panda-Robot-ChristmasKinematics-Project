@@ -39,6 +39,10 @@ TAUGHT_TURN_POINTS = [
 # is too close to joint 5's limit, which is why the robot refused it.
 Q_LEG_END = [-0.0246, 1.6600, -1.0082, -2.4151, -2.8761, 1.2171, 1.9770]
 
+# The leg sits loose in the gap between the fingers, so it lags behind the gripper.
+# PUSH goes this many degrees past the taught end position to make up for that.
+EXTRA_PUSH_DEG = 10.0
+
 GRIPPER_SPEED = 0.02     # top speed of the gripper along the curve [m/s]
 DT = 0.05                # time between trajectory points [s]; the robot fills in 1 kHz between them
 
@@ -107,7 +111,8 @@ class ShelfCurve:
 
         self.start_angle = angles[0]
         self.push_angle = angles[-2]     # the last taught point: PUSH starts here
-        self.end_angle = angles[-1]
+        self.leg_end_angle = angles[-1]  # the taught end position
+        self.end_angle = angles[-1] + np.radians(EXTRA_PUSH_DEG)  # where PUSH stops
         self.height = min(np.r_[turn[:, 2], end[2]])   # one height: the lowest point's
 
         # distance from the centre: through every point, the end included
@@ -118,12 +123,13 @@ class ShelfCurve:
         print("Taught points (angle around centre, distance, height, hand turn):")
         for a, d, z, h in turn:
             print(f"  {np.degrees(a):6.1f} deg  {d:.4f} m  {z:.4f} m  {np.degrees(h):6.1f} deg")
-        print(f"  end {np.degrees(end[0]):6.1f} deg  {end[1]:.4f} m  (position only)")
+        print(f"  end {np.degrees(end[0]):6.1f} deg  {end[1]:.4f} m  (position only; "
+              f"PUSH goes {EXTRA_PUSH_DEG:.0f} deg further)")
         print(f"Curve height {self.height:.4f} m")
 
     def pose(self, angle):
         """The gripper pose at `angle` [rad] around the shelf centre."""
-        d = float(self.distance(angle))
+        d = float(self.distance(min(angle, self.leg_end_angle)))   # constant past the taught end
         x = self.center[0] + d * np.cos(angle)
         y = self.center[1] + d * np.sin(angle)
         h = float(self.hand_turn(min(angle, self.push_angle)))  # frozen after the last taught point
