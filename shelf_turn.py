@@ -21,6 +21,7 @@ The motion has two parts:
 import numpy as np
 import roboticstoolbox as rtb
 from scipy.interpolate import PchipInterpolator
+from scipy.spatial.transform import Rotation
 from spatialmath import SE3
 
 # ---------------------------------------------------------------- settings ---
@@ -43,8 +44,15 @@ Q_LEG_END = [-0.0246, 1.6600, -1.0082, -2.4151, -2.8761, 1.2171, 1.9770]
 # PUSH goes this many degrees past the taught end position to make up for that.
 EXTRA_PUSH_DEG = 10.0
 
+# Keep the fingers level (parallel to the ground) during TURN and PUSH, instead of
+# copying the grasp's small tilt. A negative FINGER_TILT_DEG points the fingers that
+# much DOWN (more clearance under the shelf); 0 = exactly level.
+FINGER_TILT_DEG = 0.0
+LEVEL_BLEND_DEG = 10.0   # level the hand gradually over the first degrees of TURN (no jerk)
+
 GRIPPER_SPEED = 0.03     # top speed of the gripper along the curve [m/s] (0.02 before speeding up)
 DT = 0.05                # time between trajectory points [s]; the robot fills in 1 kHz between them
+CURVE_DT = 0.03          # the shelf turn's (closer points: at 0.03 m/s its steps were near the 0.025 rad limit)
 
 # The robot server's checks (see robot-interface/README.md, "What the miniPC checks")
 SERVER_LIMIT_MARGIN = 0.01                                      # rad from each joint limit
@@ -89,6 +97,26 @@ def describe_point(panda, q, center, R_grasp):
     return angle, distance, T.t[2], hand_turn
 
 
+def level_orientation(R, tilt_deg=0.0):
+    """
+    The hand orientation closest to R with the fingers exactly level (tilted by
+    tilt_deg: + up, - down), pointing the same way (heading) as in R.
+
+    Columns of a rotation matrix = the hand's x, y, z axes in the base frame.
+    z = where the fingers point, x = across the hand (vertical at our grasp).
+    """
+    heading = R[:, 2].copy()
+    heading[2] = 0.0                                  # drop the up/down part of the fingers' direction
+    heading /= np.linalg.norm(heading)
+    up = np.array([0.0, 0.0, 1.0])
+    a = np.radians(tilt_deg)
+    z = np.cos(a) * heading + np.sin(a) * up          # fingers: level, then tilted by tilt_deg
+    side = np.sign(R[2, 0]) or -1.0                   # keep the hand's x axis pointing down (or up) as in R
+    x = side * (-np.sin(a) * heading + np.cos(a) * up)  # perpendicular to z, in the same vertical plane
+    y = np.cross(z, x)                                # completes a right-handed frame
+    return np.column_stack([x, y, z])
+
+
 # ------------------------------------------------- step 2: the smooth curve ---
 class ShelfCurve:
     """
@@ -101,6 +129,11 @@ class ShelfCurve:
     def __init__(self, panda, q_turn_points, q_end, center):
         self.center = np.asarray(center, dtype=float)
         self.R_grasp = panda.fkine(np.asarray(q_turn_points[0], dtype=float)).R
+        # The small rotation that levels the grasp orientation (applied gradually in pose())
+        R_level = level_orientation(self.R_grasp, FINGER_TILT_DEG)
+        self.level_fix = Rotation.from_matrix(R_level @ self.R_grasp.T).as_rotvec()
+        print(f"Levelling the hand: fingers were tilted "
+              f"{np.degrees(np.arcsin(self.R_grasp[2, 2])):+.1f} deg, now {FINGER_TILT_DEG:+.1f} deg")
 
         turn = np.array([describe_point(panda, q, center, self.R_grasp) for q in q_turn_points])
         end = describe_point(panda, q_end, center, self.R_grasp)
@@ -133,7 +166,10 @@ class ShelfCurve:
         x = self.center[0] + d * np.cos(angle)
         y = self.center[1] + d * np.sin(angle)
         h = float(self.hand_turn(min(angle, self.push_angle)))  # frozen after the last taught point
-        R = SE3.Rz(h).R @ self.R_grasp                          # turn the hand about the vertical
+        # level the hand: none of the fix at the grasp, all of it after LEVEL_BLEND_DEG
+        w = smooth_fraction(np.clip((angle - self.start_angle) / np.radians(LEVEL_BLEND_DEG), 0.0, 1.0))
+        R_levelled = Rotation.from_rotvec(w * self.level_fix).as_matrix() @ self.R_grasp
+        R = SE3.Rz(h).R @ R_levelled                            # turn the hand about the vertical
         return SE3.Rt(R, [x, y, self.height])
 
 
@@ -157,7 +193,7 @@ def smooth_fraction(tau):
     return 10 * tau**3 - 15 * tau**4 + 6 * tau**5
 
 
-def plan_along_curve(panda, curve, q_start, a_from, a_to, speed=GRIPPER_SPEED, dt=DT):
+def plan_along_curve(panda, curve, q_start, a_from, a_to, speed=GRIPPER_SPEED, dt=CURVE_DT):
     """
     One smooth move along the curve, from angle a_from to a_to [rad].
     Returns (q_traj, dt): one row of 7 joint angles per time step.
