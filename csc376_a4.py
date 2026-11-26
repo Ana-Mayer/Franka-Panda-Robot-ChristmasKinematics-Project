@@ -120,46 +120,87 @@ def main():
     #     se3_target = panda_rtb_model.fkine([-0.0296 , 0.8752 ,-0.6361 ,-2.6688 ,-2.3438 , 1.8078 , 1.3451])
     #     move_arm(motion_generator, csc376_franky_robot, se3_target, *CAREFUL)
 
-    se3_target = panda_rtb_model.fkine([ 0.1034  ,0.9171 ,-0.0998, -1.8636, 0.0514 , 1.19   , 0.7142])
+    # [ 0.2651,  1.2926, -0.8798, -1.8775, -2.5912,  2.2531,  1.4068]
+    se3_target = panda_rtb_model.fkine([ 0.2651,  1.2926, -0.8798, -1.8775, -2.5912,  2.2531,  1.4068])
     move_arm(motion_generator, csc376_franky_robot, se3_target, *FAST)
-    # Move towards the spoon
-    se3_target = panda_rtb_model.fkine([ 0.1542 , 0.4514 , 0.874 , -2.1559  ,0.8927 , 3.0592 , 2.3997])
-    move_arm(motion_generator, csc376_franky_robot, se3_target, *FAST)
-    se3_target = panda_rtb_model.fkine(Q_SPOON_GRAB)
+    csc376_gripper.grasp(0.079, 0.07995638996362686, 10)
+    se3_target = panda_rtb_model.fkine([ 0.801 ,  1.5235, -1.5574, -2.1236, -2.8819,  2.8281,  2.0613])
     move_arm(motion_generator, csc376_franky_robot, se3_target, *CAREFUL)
-    # Grab Spoon
-    csc376_gripper.grasp(0.025739362463355064, 0.07995638996362686, 0.5)
-    # Move spoon up to avoid collision with the spoon stand
-    se3_target = panda_rtb_model.fkine(Q_SPOON_LIFT)
-    move_arm(motion_generator, csc376_franky_robot, se3_target, *CAREFUL)
-    # Move spoon down and rotate the end effector to prepare for scooping the sugar
-    se3_target = panda_rtb_model.fkine([ 0.8643  ,0.4895 ,-0.3838 ,-2.3638 , 1.8645  ,2.0388 , 2.6958])
-    move_arm(motion_generator, csc376_franky_robot, se3_target, *CAREFUL)
-    # Scoop the sugar (short moves of the spoon: FAST)
-    se3_target = panda_rtb_model.fkine([ 0.8634  ,0.5367 ,-0.3864 ,-2.3182 , 1.8678 , 2.0766  ,1.6159])
-    move_arm(motion_generator, csc376_franky_robot, se3_target, *FAST)
-    # Lift the spoon up to avoid collision with the sugar container
-    se3_target = panda_rtb_model.fkine([ 0.7639 , 0.5912, -0.3391 ,-2.2979,  1.8691 , 1.954  , 1.309 ])
-    move_arm(motion_generator, csc376_franky_robot, se3_target, *FAST)
-    # Move spoon to the cup on rotating shelf and rotate the spoon such that the sugar is in the cup
-    se3_target = panda_rtb_model.fkine(Q_SPOON_BY_SUGAR)
-    move_arm(motion_generator, csc376_franky_robot, se3_target, *FAST)
-    # The long move to the cup carrying the full spoon: CARRY (1.6x our original speed)
-    se3_target = panda_rtb_model.fkine(Q_SPOON_AT_CUP)
-    move_arm(motion_generator, csc376_franky_robot, se3_target, *CARRY)
-    # Tip the spoon to pour the sugar into the cup
-    se3_target = panda_rtb_model.fkine([ 0.0889 , 0.5587 ,-0.7598, -2.0729 ,-1.2117 , 1.7461,-1.7529])
-    move_arm(motion_generator, csc376_franky_robot, se3_target, *FAST)
+    # se3_target = panda_rtb_model.fkine([ 0.6297,  1.5283, -1.5859, -2.3901, -2.884 ,  2.8271,  2.0449])
+    # move_arm(motion_generator, csc376_franky_robot, se3_target, *CAREFUL)
+    # se3_target = panda_rtb_model.fkine([ 0.4552,  1.0255, -1.4108, -2.3187, -2.8835,  2.8263,  1.6973])
+    # move_arm(motion_generator, csc376_franky_robot, se3_target, *CAREFUL)
+    # # [ 0.801 ,  1.5235, -1.5574, -2.1236, -2.8819,  2.8281,  2.0613]
+    # # [ 0.6297,  1.5283, -1.5859, -2.3901, -2.884 ,  2.8271,  2.0449]
+    # # [ 0.4552,  1.0255, -1.4108, -2.3187, -2.8835,  2.8263,  1.6973]
+    # csc376_gripper.open(0.1)
+    # se3_target = panda_rtb_model.fkine([ 1.0181,  1.3209, -1.5455, -2.3676, -2.8467,  3.4939,  2.0268])
+    # move_arm(motion_generator, csc376_franky_robot, se3_target, *CAREFUL)
+    # # [ 1.0181,  1.3209, -1.5455, -2.3676, -2.8467,  3.4939,  2.0268]
 
-    # Put the spoon back. First retrace our path (known to be clear): turn the
-    # empty spoon back up, then the long move back beside the sugar (CARRY).
-    se3_target = panda_rtb_model.fkine(Q_SPOON_AT_CUP)
-    move_arm(motion_generator, csc376_franky_robot, se3_target, *FAST)
-    se3_target = panda_rtb_model.fkine(Q_SPOON_BY_SUGAR)
-    move_arm(motion_generator, csc376_franky_robot, se3_target, *CARRY)
-    # Then inverse kinematics: above the holder, straight down into it, let go, back off
-    ik_moves.return_spoon(csc376_franky_robot, panda_rtb_model, csc376_gripper,
-                          Q_SPOON_GRAB, Q_SPOON_LIFT)
+    # se3_target = panda_rtb_model.fkine([ 0.1034  ,0.9171 ,-0.0998, -1.8636, 0.0514 , 1.19   , 0.7142])
+    # move_arm(motion_generator, csc376_franky_robot, se3_target, *FAST)
+    # # Move towards the spoon
+    # se3_target = panda_rtb_model.fkine([ 0.1542 , 0.4514 , 0.874 , -2.1559  ,0.8927 , 3.0592 , 2.3997])
+    # move_arm(motion_generator, csc376_franky_robot, se3_target, *FAST)
+    # se3_target = panda_rtb_model.fkine(Q_SPOON_GRAB)
+    # move_arm(motion_generator, csc376_franky_robot, se3_target, *CAREFUL)
+    # # Grab Spoon
+    # csc376_gripper.grasp(0.025739362463355064, 0.07995638996362686, 0.5)
+    # # Move spoon up to avoid collision with the spoon stand
+    # se3_target = panda_rtb_model.fkine(Q_SPOON_LIFT)
+    # move_arm(motion_generator, csc376_franky_robot, se3_target, *CAREFUL)
+    # # Move spoon down and rotate the end effector to prepare for scooping the sugar
+    # se3_target = panda_rtb_model.fkine([ 0.8643  ,0.4895 ,-0.3838 ,-2.3638 , 1.8645  ,2.0388 , 2.6958])
+    # move_arm(motion_generator, csc376_franky_robot, se3_target, *CAREFUL)
+    # # Scoop the sugar (short moves of the spoon: FAST)
+    # se3_target = panda_rtb_model.fkine([ 0.8634  ,0.5367 ,-0.3864 ,-2.3182 , 1.8678 , 2.0766  ,1.6159])
+    # move_arm(motion_generator, csc376_franky_robot, se3_target, *FAST)
+    # # Lift the spoon up to avoid collision with the sugar container
+    # se3_target = panda_rtb_model.fkine([ 0.7639 , 0.5912, -0.3391 ,-2.2979,  1.8691 , 1.954  , 1.309 ])
+    # move_arm(motion_generator, csc376_franky_robot, se3_target, *FAST)
+    # # Move spoon to the cup on rotating shelf and rotate the spoon such that the sugar is in the cup
+    # se3_target = panda_rtb_model.fkine(Q_SPOON_BY_SUGAR)
+    # move_arm(motion_generator, csc376_franky_robot, se3_target, *FAST)
+    # # The long move to the cup carrying the full spoon: CARRY (1.6x our original speed)
+    # se3_target = panda_rtb_model.fkine(Q_SPOON_AT_CUP)
+    # move_arm(motion_generator, csc376_franky_robot, se3_target, *FAST)
+    # # Tip the spoon to pour the sugar into the cup
+    # se3_target = panda_rtb_model.fkine([ 0.0889 , 0.5587 ,-0.7598, -2.0729 ,-1.2117 , 1.7461,-1.7529])
+    # move_arm(motion_generator, csc376_franky_robot, se3_target, *FAST)
+
+    # # Put the spoon back. First retrace our path (known to be clear): turn the
+    # # empty spoon back up, then the long move back beside the sugar (CARRY).
+    # se3_target = panda_rtb_model.fkine(Q_SPOON_AT_CUP)
+    # move_arm(motion_generator, csc376_franky_robot, se3_target, *FAST)
+    # se3_target = panda_rtb_model.fkine(Q_SPOON_BY_SUGAR)
+    # move_arm(motion_generator, csc376_franky_robot, se3_target, *FAST)
+    # # Then inverse kinematics: above the holder, straight down into it, let go, back off
+    # ik_moves.return_spoon(csc376_franky_robot, panda_rtb_model, csc376_gripper,
+    #                       Q_SPOON_GRAB, Q_SPOON_LIFT)
+    # se3_target = panda_rtb_model.fkine([ 0.4478,  0.6346,  0.366 , -2.4139,  2.2961,  1.8726,  0.6787])
+    # move_arm(motion_generator, csc376_franky_robot, se3_target, *SLOW)
+    # se3_target = panda_rtb_model.fkine([ 0.5211,  0.7579,  0.3502, -2.3116,  2.3611,  1.7776,  0.6515])
+    # move_arm(motion_generator, csc376_franky_robot, se3_target, *CAREFUL)
+    # csc376_gripper.grasp(0.079, 0.07995638996362686, 0.7)
+    # se3_target = panda_rtb_model.fkine([ 0.5735,  1.4443, -1.5997, -2.1595, -0.5895,  2.8805, -0.3586])
+    # move_arm(motion_generator, csc376_franky_robot, se3_target, *CAREFUL)
+    # se3_target = panda_rtb_model.fkine([-0.3675, -0.0557, -0.6446, -2.2735, -1.6615,  2.6693,  1.645 ])
+    # move_arm(motion_generator, csc376_franky_robot, se3_target, *CAREFUL)
+    # se3_target = panda_rtb_model.fkine([ 0.5735,  1.4443, -1.5997, -2.1595, -0.5895,  2.8805, -0.3586])
+    # move_arm(motion_generator, csc376_franky_robot, se3_target, *CAREFUL)
+    # se3_target = panda_rtb_model.fkine([ 0.5211,  0.7579,  0.3502, -2.3116,  2.3611,  1.7776,  0.6515])
+    # move_arm(motion_generator, csc376_franky_robot, se3_target, *CAREFUL)
+    # csc376_gripper.open(0.1)
+    # se3_target = panda_rtb_model.fkine([ 0.4478,  0.6346,  0.366 , -2.4139,  2.2961,  1.8726,  0.6787])
+    # move_arm(motion_generator, csc376_franky_robot, se3_target, *SLOW)
+    # csc376_franky_robot.move_home(0.2) # Move home
+    # [ 0.4478,  0.6346,  0.366 , -2.4139,  2.2961,  1.8726,  0.6787]
+    # [ 0.3982,  0.8047,  0.4627, -2.3149,  2.3465,  1.8158,  0.6143]
+    # [ 0.2865,  0.7408, -1.7828, -2.561 ,  2.8227,  2.0167,  1.6625]
+    # [ 0.4197,  0.7415, -1.6946, -2.6228,  2.8127,  2.0171, -0.1666]
+    # [ 0.4473,  0.7415, -1.6924, -2.6175,  2.8129,  2.0168, -0.4685]
+    # [ 0.1011,  0.415 , -0.2393, -2.4167,  0.8606,  1.3049,  0.9121]
 
     return visualizer
 
